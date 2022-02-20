@@ -4,7 +4,7 @@
     src="https://user-images.githubusercontent.com/6550035/46709024-9b23ad00-cbf6-11e8-9fb2-ca8b20b7dbec.jpg"
     width="408px" border="0" alt="croc">
 <br>
-<a href="https://github.com/schollz/croc/releases/latest"><img src="https://img.shields.io/badge/version-v9.3.0-brightgreen.svg?style=flat-square" alt="Version"></a>
+<a href="https://github.com/schollz/croc/releases/latest"><img src="https://img.shields.io/badge/version-v9.5.1-brightgreen.svg?style=flat-square" alt="Version"></a>
 <a href="https://coveralls.io/github/schollz/croc"><img src="https://img.shields.io/badge/coverage-81%25-green.svg?style=flat-square" alt="Coverage"></a>
 <a href="https://travis-ci.org/schollz/croc"><img
 src="https://img.shields.io/travis/schollz/croc.svg?style=flat-square" alt="Build
@@ -28,7 +28,7 @@ Status"></a>
 - **ipv6-first** with ipv4 fallback
 - can **use proxy**, like tor
 
-For more information about `croc`, see [my blog post](https://schollz.com/software/croc6).
+For more information about `croc`, see [my blog post](https://schollz.com/software/croc6) or read a [recent interview I did](https://console.substack.com/p/console-91).
 
 ![Example](src/install/customization.gif)
 
@@ -101,7 +101,7 @@ On FreeBSD you can install with `pkg`:
 pkg install croc
 ```
 
-Or, you can [install Go](https://golang.org/dl/) and build from source (requires Go 1.15+): 
+Or, you can [install Go](https://golang.org/dl/) and build from source (requires Go 1.17+): 
 
 ```
 go install github.com/schollz/croc/v9@latest

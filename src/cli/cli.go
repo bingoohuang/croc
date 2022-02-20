@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -34,13 +33,21 @@ func Run() (err error) {
 	app := cli.NewApp()
 	app.Name = "croc"
 	if Version == "" {
-		Version = "v9.3.0-94b2aff"
+		Version = "v9.5.1-b0e7d4d"
 	}
 	app.Version = Version
 	app.Compiled = time.Now()
 	app.Usage = "easily and securely transfer stuff from one computer to another"
 	app.UsageText = `Send a file:
       croc send file.txt
+
+   Send multiple files:
+      croc send file1.txt file2.txt file3.txt
+    or
+      croc send *.jpg
+
+   Send everything in a folder:
+      croc send example-folder-name
 
    Send a file with a custom code:
       croc send --code secret-code file.txt
@@ -50,9 +57,9 @@ func Run() (err error) {
 	app.Commands = []*cli.Command{
 		{
 			Name:        "send",
-			Usage:       "send a file (see options with croc send -h)",
-			Description: "send a file over the relay",
-			ArgsUsage:   "[filename]",
+			Usage:       "send file(s), or folder (see options with croc send -h)",
+			Description: "send file(s), or folder, over the relay",
+			ArgsUsage:   "[filename(s) or folder]",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "code", Aliases: []string{"c"}, Usage: "codephrase used to connect to relay"},
 				&cli.StringFlag{Name: "hash", Value: "xxhash", Usage: "hash algorithm (xxhash, imohash, md5)"},
@@ -62,19 +69,16 @@ func Run() (err error) {
 				&cli.StringFlag{Name: "ports", Value: "9009,9010,9011,9012,9013", Usage: "ports of the local relay (optional)"},
 			},
 			HelpName: "croc send",
-			Action: func(c *cli.Context) error {
-				return send(c)
-			},
+			Action:   send,
 		},
 		{
 			Name:        "relay",
 			Usage:       "start your own relay (optional)",
 			Description: "start relay",
 			HelpName:    "croc relay",
-			Action: func(c *cli.Context) error {
-				return relay(c)
-			},
+			Action:      relay,
 			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "host", Usage: "host of the relay"},
 				&cli.StringFlag{Name: "ports", Value: "9009,9010,9011,9012,9013", Usage: "ports of the relay"},
 			},
 		},
@@ -97,6 +101,7 @@ func Run() (err error) {
 		&cli.StringFlag{Name: "out", Value: ".", Usage: "specify an output folder to receive the file"},
 		&cli.StringFlag{Name: "pass", Value: models.DEFAULT_PASSPHRASE, Usage: "password for the relay", EnvVars: []string{"CROC_PASS"}},
 		&cli.StringFlag{Name: "socks5", Value: "", Usage: "add a socks5 proxy", EnvVars: []string{"SOCKS5_PROXY"}},
+		&cli.StringFlag{Name: "throttleUpload", Value: "", Usage: "Throttle the upload speed e.g. 500k"},
 	}
 	app.EnableBashCompletion = true
 	app.HideHelp = false
@@ -130,28 +135,6 @@ func Run() (err error) {
 	return app.Run(os.Args)
 }
 
-func getConfigDir() (homedir string, err error) {
-	homedir, err = os.UserHomeDir()
-	if err != nil {
-		log.Error(err)
-		return
-	}
-
-	if envHomedir, isSet := os.LookupEnv("CROC_CONFIG_DIR"); isSet {
-		homedir = envHomedir
-	} else if xdgConfigHome, isSet := os.LookupEnv("XDG_CONFIG_HOME"); isSet {
-		homedir = path.Join(xdgConfigHome, "croc")
-	} else {
-		homedir = path.Join(homedir, ".config", "croc")
-	}
-
-	if _, err = os.Stat(homedir); os.IsNotExist(err) {
-		log.Debugf("creating home directory %s", homedir)
-		err = os.MkdirAll(homedir, 0700)
-	}
-	return
-}
-
 func setDebugLevel(c *cli.Context) {
 	if c.Bool("debug") {
 		log.SetLevel("debug")
@@ -162,7 +145,7 @@ func setDebugLevel(c *cli.Context) {
 }
 
 func getConfigFile() string {
-	configFile, err := getConfigDir()
+	configFile, err := utils.GetConfigDir()
 	if err != nil {
 		log.Error(err)
 		return ""
@@ -172,7 +155,7 @@ func getConfigFile() string {
 
 func determinePass(c *cli.Context) (pass string) {
 	pass = c.String("pass")
-	b, err := ioutil.ReadFile(pass)
+	b, err := os.ReadFile(pass)
 	if err == nil {
 		pass = strings.TrimSpace(string(b))
 	}
@@ -202,13 +185,14 @@ func send(c *cli.Context) (err error) {
 		Overwrite:      c.Bool("overwrite"),
 		Curve:          c.String("curve"),
 		HashAlgorithm:  c.String("hash"),
+		ThrottleUpload: c.String("throttleUpload"),
 	}
 	if crocOptions.RelayAddress != models.DEFAULT_RELAY {
 		crocOptions.RelayAddress6 = ""
 	} else if crocOptions.RelayAddress6 != models.DEFAULT_RELAY6 {
 		crocOptions.RelayAddress = ""
 	}
-	b, errOpen := ioutil.ReadFile(getConfigFile())
+	b, errOpen := os.ReadFile(getConfigFile())
 	if errOpen == nil && !c.Bool("remember") {
 		var rememberedOptions croc.Options
 		err = json.Unmarshal(b, &rememberedOptions)
@@ -217,28 +201,28 @@ func send(c *cli.Context) (err error) {
 			return
 		}
 		// update anything that isn't explicitly set
-		if !c.IsSet("relay") {
+		if !c.IsSet("relay") && rememberedOptions.RelayAddress != "" {
 			crocOptions.RelayAddress = rememberedOptions.RelayAddress
 		}
 		if !c.IsSet("no-local") {
 			crocOptions.DisableLocal = rememberedOptions.DisableLocal
 		}
-		if !c.IsSet("ports") {
+		if !c.IsSet("ports") && len(rememberedOptions.RelayPorts) > 0 {
 			crocOptions.RelayPorts = rememberedOptions.RelayPorts
 		}
 		if !c.IsSet("code") {
 			crocOptions.SharedSecret = rememberedOptions.SharedSecret
 		}
-		if !c.IsSet("pass") {
+		if !c.IsSet("pass") && rememberedOptions.RelayPassword != "" {
 			crocOptions.RelayPassword = rememberedOptions.RelayPassword
 		}
-		if !c.IsSet("relay6") {
+		if !c.IsSet("relay6") && rememberedOptions.RelayAddress6 != "" {
 			crocOptions.RelayAddress6 = rememberedOptions.RelayAddress6
 		}
 		if !c.IsSet("overwrite") {
 			crocOptions.Overwrite = rememberedOptions.Overwrite
 		}
-		if !c.IsSet("curve") {
+		if !c.IsSet("curve") && rememberedOptions.Curve != "" {
 			crocOptions.Curve = rememberedOptions.Curve
 		}
 		if !c.IsSet("local") {
@@ -275,7 +259,7 @@ func send(c *cli.Context) (err error) {
 		fnames = c.Args().Slice()
 	}
 	if len(fnames) == 0 {
-		return errors.New("must specify file: croc send [filename]")
+		return errors.New("must specify file: croc send [filename(s) or folder]")
 	}
 
 	if len(crocOptions.SharedSecret) == 0 {
@@ -305,7 +289,7 @@ func send(c *cli.Context) (err error) {
 }
 
 func getStdin() (fnames []string, err error) {
-	f, err := ioutil.TempFile(".", "croc-stdin-")
+	f, err := os.CreateTemp(".", "croc-stdin-")
 	if err != nil {
 		return
 	}
@@ -322,7 +306,7 @@ func getStdin() (fnames []string, err error) {
 }
 
 func makeTempFileWithString(s string) (fnames []string, err error) {
-	f, err := ioutil.TempFile(".", "croc-stdin-")
+	f, err := os.CreateTemp(".", "croc-stdin-")
 	if err != nil {
 		return
 	}
@@ -344,6 +328,17 @@ func getPaths(fnames []string) (paths []string, haveFolder bool, err error) {
 	haveFolder = false
 	paths = []string{}
 	for _, fname := range fnames {
+		// Support wildcard
+		if strings.Contains(fname, "*") {
+			matches, errGlob := filepath.Glob(fname)
+			if errGlob != nil {
+				err = errGlob
+				return
+			}
+			paths = append(paths, matches...)
+			continue
+		}
+
 		stat, errStat := os.Lstat(fname)
 		if errStat != nil {
 			err = errStat
@@ -385,7 +380,7 @@ func saveConfig(c *cli.Context, crocOptions croc.Options) {
 			log.Error(err)
 			return
 		}
-		err = ioutil.WriteFile(configFile, bConfig, 0644)
+		err = os.WriteFile(configFile, bConfig, 0644)
 		if err != nil {
 			log.Error(err)
 			return
@@ -429,13 +424,13 @@ func receive(c *cli.Context) (err error) {
 
 	// load options here
 	setDebugLevel(c)
-	configFile, err := getConfigDir()
+	configFile, err := utils.GetConfigDir()
 	if err != nil {
 		log.Error(err)
 		return
 	}
 	configFile = path.Join(configFile, "receive.json")
-	b, errOpen := ioutil.ReadFile(configFile)
+	b, errOpen := os.ReadFile(configFile)
 	if errOpen == nil && !c.Bool("remember") {
 		var rememberedOptions croc.Options
 		err = json.Unmarshal(b, &rememberedOptions)
@@ -443,8 +438,8 @@ func receive(c *cli.Context) (err error) {
 			log.Error(err)
 			return
 		}
-		// update anything that isn't expliciGlobalIsSettly set
-		if !c.IsSet("relay") {
+		// update anything that isn't explicitly Globally set
+		if !c.IsSet("relay") && rememberedOptions.RelayAddress != "" {
 			crocOptions.RelayAddress = rememberedOptions.RelayAddress
 		}
 		if !c.IsSet("yes") {
@@ -453,16 +448,16 @@ func receive(c *cli.Context) (err error) {
 		if crocOptions.SharedSecret == "" {
 			crocOptions.SharedSecret = rememberedOptions.SharedSecret
 		}
-		if !c.IsSet("pass") {
+		if !c.IsSet("pass") && rememberedOptions.RelayPassword != "" {
 			crocOptions.RelayPassword = rememberedOptions.RelayPassword
 		}
-		if !c.IsSet("relay6") {
+		if !c.IsSet("relay6") && rememberedOptions.RelayAddress6 != "" {
 			crocOptions.RelayAddress6 = rememberedOptions.RelayAddress6
 		}
 		if !c.IsSet("overwrite") {
 			crocOptions.Overwrite = rememberedOptions.Overwrite
 		}
-		if !c.IsSet("curve") {
+		if !c.IsSet("curve") && rememberedOptions.Curve != "" {
 			crocOptions.Curve = rememberedOptions.Curve
 		}
 		if !c.IsSet("local") {
@@ -493,7 +488,7 @@ func receive(c *cli.Context) (err error) {
 			log.Error(err)
 			return
 		}
-		err = ioutil.WriteFile(configFile, bConfig, 0644)
+		err = os.WriteFile(configFile, bConfig, 0644)
 		if err != nil {
 			log.Error(err)
 			return
@@ -511,6 +506,7 @@ func relay(c *cli.Context) (err error) {
 	if c.Bool("debug") {
 		debugString = "debug"
 	}
+	host := c.String("host")
 	ports := strings.Split(c.String("ports"), ",")
 	tcpPorts := strings.Join(ports[1:], ",")
 	for i, port := range ports {
@@ -518,11 +514,11 @@ func relay(c *cli.Context) (err error) {
 			continue
 		}
 		go func(portStr string) {
-			err = tcp.Run(debugString, portStr, determinePass(c))
+			err = tcp.Run(debugString, host, portStr, determinePass(c))
 			if err != nil {
 				panic(err)
 			}
 		}(port)
 	}
-	return tcp.Run(debugString, ports[0], determinePass(c), tcpPorts)
+	return tcp.Run(debugString, host, ports[0], determinePass(c), tcpPorts)
 }
